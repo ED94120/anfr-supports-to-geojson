@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Convertisseur CSV ANFR → GeoJSON</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      color: #222;
+      background: #f7f7f7;
+    }
+
+    .container {
+      max-width: 980px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #ccc;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 22px;
+    }
+
+    .drop-zone {
+      border: 2px dashed #888;
+      background: #fafafa;
+      padding: 24px;
+      text-align: center;
+      margin-bottom: 16px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    .drop-zone.dragover {
+      background: #eef6ff;
+      border-color: #2b6cb0;
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    button,
+    input[type="file"] {
+      font-size: 14px;
+    }
+
+    button {
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .status, .results, .log {
+      border: 1px solid #ccc;
+      background: #fafafa;
+      padding: 12px;
+      margin-top: 12px;
+      white-space: pre-wrap;
+    }
+
+    .results table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 8px;
+    }
+
+    .results th,
+    .results td {
+      border: 1px solid #ccc;
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .small {
+      font-size: 12px;
+      color: #555;
+    }
+
+    .ok {
+      color: #0a7a1f;
+      font-weight: bold;
+    }
+
+    .warn {
+      color: #b36b00;
+      font-weight: bold;
+    }
+
+    .err {
+      color: #b00020;
+      font-weight: bold;
+    }
+
+    code {
+      background: #f0f0f0;
+      padding: 1px 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Convertisseur CSV ANFR → GeoJSON</h1>
+
+    <div class="drop-zone" id="dropZone">
+      Dépose ici le fichier CSV ANFR<br />
+      <span class="small">ou utilise le bouton de sélection ci-dessous</span>
+    </div>
+
+    <div class="row">
+      <input type="file" id="fileInput" accept=".csv,.txt" />
+      <button id="convertBtn" disabled>Convertir en GeoJSON</button>
+      <button id="downloadBtn" disabled>Télécharger le GeoJSON</button>
+      <button id="resetBtn">Réinitialiser</button>
+    </div>
+
+    <div class="status" id="statusBox">Aucun fichier chargé.</div>
+
+    <div class="results" id="resultsBox">
+      <strong>Résultats</strong>
+      <table>
+        <tbody>
+          <tr><th>Fichier source</th><td id="resFileName">-</td></tr>
+          <tr><th>Taille source</th><td id="resFileSize">-</td></tr>
+          <tr><th>Format colonnes détecté</th><td id="resFormat">-</td></tr>
+          <tr><th>Lignes de données lues</th><td id="resRowsRead">-</td></tr>
+          <tr><th>Lignes valides</th><td id="resRowsValid">-</td></tr>
+          <tr><th>Supports uniques écrits</th><td id="resUniqueWritten">-</td></tr>
+          <tr><th>Doublons ignorés</th><td id="resDuplicates">-</td></tr>
+          <tr><th>Lignes rejetées</th><td id="resRejected">-</td></tr>
+          <tr><th>Anomalies SUP_ID / position</th><td id="resConflicts">-</td></tr>
+          <tr><th>Nom fichier GeoJSON</th><td id="resOutputName">-</td></tr>
+          <tr><th>Taille GeoJSON</th><td id="resOutputSize">-</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="log" id="logBox">Journal prêt.</div>
+    <div class="log">
+    <strong style="display:block; margin-left:0;">Aperçu des 3 premiers supports écrits</strong>
+    <pre id="previewBox" style="margin:8px 0 0 0; white-space:pre-wrap;">-</pre>
+    </div>
+  </div>
+
+  <script>
+    const dropZone = document.getElementById("dropZone");
+    const fileInput = document.getElementById("fileInput");
+    const convertBtn = document.getElementById("convertBtn");
+    const downloadBtn = document.getElementById("downloadBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const statusBox = document.getElementById("statusBox");
+    const logBox = document.getElementById("logBox");
+    const previewBox = document.getElementById("previewBox");
+
+    const resFileName = document.getElementById("resFileName");
+    const resFileSize = document.getElementById("resFileSize");
+    const resFormat = document.getElementById("resFormat");
+    const resRowsRead = document.getElementById("resRowsRead");
+    const resRowsValid = document.getElementById("resRowsValid");
+    const resUniqueWritten = document.getElementById("resUniqueWritten");
+    const resDuplicates = document.getElementById("resDuplicates");
+    const resRejected = document.getElementById("resRejected");
+    const resConflicts = document.getElementById("resConflicts");
+    const resOutputName = document.getElementById("resOutputName");
+    const resOutputSize = document.getElementById("resOutputSize");
+
+    let currentFile = null;
+    let geojsonText = "";
+    let geojsonBlob = null;
+    let outputFileName = "";
+
+    /*
+    const REQUIRED_CANONICAL_FIELDS = [
+      "SUP_ID",
+      "STA_NM_ANFR",
+      "NAT_ID",
+      "COR_NB_DG_LAT",
+      "COR_NB_MN_LAT",
+      "COR_NB_SC_LAT",
+      "COR_CD_NS_LAT",
+      "COR_NB_DG_LON",
+      "COR_NB_MN_LON",
+      "COR_NB_SC_LON",
+      "COR_CD_EW_LON",
+      "SUP_NM_HAUT",
+      "TPO_ID",
+      "ADR_LB_LIEU",
+      "ADR_LB_ADD1",
+      "ADR_LB_ADD2",
+      "ADR_LB_ADD3",
+      "ADR_NM_CP",
+      "COM_CD_INSEE"
+    ];
+    */
+
+    const REQUIRED_CANONICAL_FIELDS = [
+    "SUP_ID",
+    "COR_NB_DG_LAT",
+    "COR_NB_MN_LAT",
+    "COR_NB_SC_LAT",
+    "COR_CD_NS_LAT",
+    "COR_NB_DG_LON",
+    "COR_NB_MN_LON",
+    "COR_NB_SC_LON",
+    "COR_CD_EW_LON"
+    ];
+
+    // Format actuel + alias possibles pour un format futur.
+    // Tu pourras enrichir ce mapping si ANFR change des noms.
+    const FIELD_ALIASES = {
+      SUP_ID: ["SUP_ID", "SUPID", "ID_SUPPORT", "SUPPORT_ID"],
+      STA_NM_ANFR: ["STA_NM_ANFR", "STA_NM", "STATION", "STA_NAME"],
+      NAT_ID: ["NAT_ID", "NATURE_ID", "TYPE_NAT_ID"],
+      COR_NB_DG_LAT: ["COR_NB_DG_LAT", "LAT_DG", "LAT_DEG", "LATITUDE_DEG"],
+      COR_NB_MN_LAT: ["COR_NB_MN_LAT", "LAT_MN", "LAT_MIN", "LATITUDE_MIN"],
+      COR_NB_SC_LAT: ["COR_NB_SC_LAT", "LAT_SC", "LAT_SEC", "LATITUDE_SEC"],
+      COR_CD_NS_LAT: ["COR_CD_NS_LAT", "LAT_NS", "LAT_HEMI", "LATITUDE_HEMI"],
+      COR_NB_DG_LON: ["COR_NB_DG_LON", "LON_DG", "LON_DEG", "LONGITUDE_DEG"],
+      COR_NB_MN_LON: ["COR_NB_MN_LON", "LON_MN", "LON_MIN", "LONGITUDE_MIN"],
+      COR_NB_SC_LON: ["COR_NB_SC_LON", "LON_SC", "LON_SEC", "LONGITUDE_SEC"],
+      COR_CD_EW_LON: ["COR_CD_EW_LON", "LON_EW", "LON_HEMI", "LONGITUDE_HEMI"],
+      SUP_NM_HAUT: ["SUP_NM_HAUT", "HAUTEUR", "SUPPORT_HAUT", "HEIGHT"],
+      TPO_ID: ["TPO_ID", "TYPE_PO_ID", "TPO"],
+      ADR_LB_LIEU: ["ADR_LB_LIEU", "LIEU", "ADR_LIEU"],
+      ADR_LB_ADD1: ["ADR_LB_ADD1", "ADR1", "ADRESSE1"],
+      ADR_LB_ADD2: ["ADR_LB_ADD2", "ADR2", "ADRESSE2"],
+      ADR_LB_ADD3: ["ADR_LB_ADD3", "ADR3", "ADRESSE3"],
+      ADR_NM_CP: ["ADR_NM_CP", "CP", "CODE_POSTAL", "POSTCODE"],
+      COM_CD_INSEE: ["COM_CD_INSEE", "INSEE", "COMMUNE_INSEE", "CODE_INSEE"]
+    };
+
+    function normalizeHeaderName(name) {
+      return String(name || "")
+        .replace(/^\uFEFF/, "")
+        .trim()
+        .toUpperCase();
+    }
+
+    function formatBytes(bytes) {
+      if (!Number.isFinite(bytes)) return "-";
+      if (bytes < 1024) return bytes + " octets";
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + " Ko";
+      return (bytes / (1024 * 1024)).toFixed(2) + " Mo";
+    }
+
+    function todayForFileName() {
+      const d = new Date();
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      return `${yyyy}-${mm}-${dd}`;
+    }
+
+    function setStatus(message, cssClass = "") {
+      statusBox.className = "status";
+      if (cssClass) statusBox.classList.add(cssClass);
+      statusBox.textContent = message;
+    }
+
+    function setLog(message) {
+      logBox.textContent = message;
+    }
+
+    function resetResults() {
+      resFileName.textContent = "-";
+      resFileSize.textContent = "-";
+      resFormat.textContent = "-";
+      resRowsRead.textContent = "-";
+      resRowsValid.textContent = "-";
+      resUniqueWritten.textContent = "-";
+      resDuplicates.textContent = "-";
+      resRejected.textContent = "-";
+      resConflicts.textContent = "-";
+      resOutputName.textContent = "-";
+      resOutputSize.textContent = "-";
+    }
+
+    function resetAll() {
+      currentFile = null;
+      geojsonText = "";
+      geojsonBlob = null;
+      outputFileName = "";
+      fileInput.value = "";
+      convertBtn.disabled = true;
+      downloadBtn.disabled = true;
+      setStatus("Aucun fichier chargé.");
+      setLog("Journal prêt.");
+      previewBox.textContent = "-";
+      resetResults();
+    }
+
+    function setFile(file) {
+      currentFile = file || null;
+      geojsonText = "";
+      geojsonBlob = null;
+      outputFileName = "";
+      downloadBtn.disabled = true;
+
+      if (!currentFile) {
+        convertBtn.disabled = true;
+        setStatus("Aucun fichier chargé.");
+        resetResults();
+        return;
+      }
+
+      convertBtn.disabled = false;
+      resFileName.textContent = currentFile.name;
+      resFileSize.textContent = formatBytes(currentFile.size);
+      setStatus(`Fichier prêt : ${currentFile.name}`, "ok");
+      setLog("Fichier chargé. Prêt pour conversion.");
+    }
+
+    function splitCsvLine(line, separator = ";") {
+      const result = [];
+      let current = "";
+      let inQuotes = false;
+
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        const next = line[i + 1];
+
+        if (ch === '"') {
+          if (inQuotes && next === '"') {
+            current += '"';
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (ch === separator && !inQuotes) {
+          result.push(current);
+          current = "";
+        } else {
+          current += ch;
+        }
+      }
+
+      result.push(current);
+      return result;
+    }
+
+    function detectLineBreak(text) {
+      if (text.includes("\r\n")) return "\r\n";
+      if (text.includes("\n")) return "\n";
+      if (text.includes("\r")) return "\r";
+      return "\n";
+    }
+
+    function trimToNull(value) {
+      const v = String(value ?? "").trim();
+      return v === "" ? null : v;
+    }
+
+    function parseNumberFlexible(value) {
+      const txt = String(value ?? "").trim().replace(",", ".");
+      if (txt === "") return NaN;
+      return Number(txt);
+    }
+
+    function isValidIntegerLike(value) {
+      const n = parseNumberFlexible(value);
+      return Number.isFinite(n);
+    }
+
+    function dmsToDecimal(deg, min, sec, hemi, isLat) {
+      const d = parseNumberFlexible(deg);
+      const m = parseNumberFlexible(min);
+      const s = parseNumberFlexible(sec);
+      const h = String(hemi ?? "").trim().toUpperCase();
+
+      if (!Number.isFinite(d) || !Number.isFinite(m) || !Number.isFinite(s)) {
+        throw new Error("Coordonnées non numériques");
+      }
+
+      if (m < 0 || m >= 60) {
+        throw new Error("Minutes hors bornes");
+      }
+
+      if (s < 0 || s >= 60) {
+        throw new Error("Secondes hors bornes");
+      }
+
+      if (isLat) {
+        if (d < 0 || d > 90) throw new Error("Latitude degrés hors bornes");
+        if (h !== "N" && h !== "S") throw new Error("Hémisphère latitude invalide");
+      } else {
+        if (d < 0 || d > 180) throw new Error("Longitude degrés hors bornes");
+        if (h !== "E" && h !== "W") throw new Error("Hémisphère longitude invalide");
+      }
+
+      let val = d + (m / 60) + (s / 3600);
+
+      if (h === "S" || h === "W") {
+        val = -val;
+      }
+
+      if (isLat && (val < -90 || val > 90)) {
+        throw new Error("Latitude décimale hors bornes");
+      }
+
+      if (!isLat && (val < -180 || val > 180)) {
+        throw new Error("Longitude décimale hors bornes");
+      }
+
+      return val;
+    }
+
+    function roundCoord(v, decimals = 6) {
+      return Number(v.toFixed(decimals));
+    }
+
+    function detectAndMapHeaders(headers) {
+      const normalizedHeaders = headers.map(normalizeHeaderName);
+      const headerIndexMap = new Map();
+
+      normalizedHeaders.forEach((h, idx) => {
+        headerIndexMap.set(h, idx);
+      });
+
+      const mapping = {};
+      let matchedCount = 0;
+
+      for (const canonicalField of REQUIRED_CANONICAL_FIELDS) {
+        const aliases = FIELD_ALIASES[canonicalField] || [canonicalField];
+        let foundIndex = -1;
+        let foundAlias = "";
+
+        for (const alias of aliases) {
+          const normalizedAlias = normalizeHeaderName(alias);
+          if (headerIndexMap.has(normalizedAlias)) {
+            foundIndex = headerIndexMap.get(normalizedAlias);
+            foundAlias = normalizedAlias;
+            break;
+          }
+        }
+
+        if (foundIndex >= 0) {
+          mapping[canonicalField] = foundIndex;
+          matchedCount++;
+        }
+      }
+
+      const requiredCore = [
+        "SUP_ID",
+        "COR_NB_DG_LAT",
+        "COR_NB_MN_LAT",
+        "COR_NB_SC_LAT",
+        "COR_CD_NS_LAT",
+        "COR_NB_DG_LON",
+        "COR_NB_MN_LON",
+        "COR_NB_SC_LON",
+        "COR_CD_EW_LON"
+      ];
+
+      const missingCore = requiredCore.filter(f => !(f in mapping));
+
+      if (missingCore.length > 0) {
+        return {
+          ok: false,
+          missingCore,
+          mapping: null,
+          formatName: "Incompatible"
+        };
+      }
+
+      let formatName = "Format ANFR / alias détecté";
+      const exactCurrentFormat = requiredCore.every(f => {
+        const idx = mapping[f];
+        return normalizeHeaderName(headers[idx]) === f;
+      });
+
+      if (exactCurrentFormat) {
+        formatName = "Format ANFR actuel";
+      } else {
+        formatName = "Format alternatif compatible";
+      }
+
+      return {
+        ok: true,
+        missingCore: [],
+        mapping,
+        formatName,
+        matchedCount
+      };
+    }
+
+    function getField(rowArray, mapping, canonicalName) {
+      const idx = mapping[canonicalName];
+      if (idx === undefined || idx < 0 || idx >= rowArray.length) return "";
+      return rowArray[idx];
+    }
+
+    function makeFeature(properties, lon, lat) {
+      return {
+        type: "Feature",
+        geometry: {
+          type: "Point",
+          coordinates: [lon, lat]
+        },
+        properties
+      };
+    }
+
+    async function readFileText(file) {
+      return await file.text();
+    }
+
+    async function convertCurrentFile() {
+      if (!currentFile) {
+        setStatus("Aucun fichier à convertir.", "err");
+        return;
+      }
+
+      convertBtn.disabled = true;
+      downloadBtn.disabled = true;
+      setStatus("Lecture du fichier en cours...", "warn");
+      setLog("Lecture en cours...");
+
+      try {
+        const text = await readFileText(currentFile);
+
+        if (!text || !text.trim()) {
+          throw new Error("Le fichier est vide.");
+        }
+
+        const lineBreak = detectLineBreak(text);
+        let lines = text.split(lineBreak);
+
+        lines = lines.filter((line, idx) => {
+          if (idx === lines.length - 1 && line.trim() === "") return false;
+          return true;
+        });
+
+        if (lines.length < 2) {
+          throw new Error("Le fichier ne contient pas assez de lignes.");
+        }
+
+        const headerLine = lines[0];
+        const headers = splitCsvLine(headerLine, ";").map(h => String(h).trim());
+
+        const detection = detectAndMapHeaders(headers);
+
+        if (!detection.ok) {
+          throw new Error(
+            "Format de colonnes incompatible. Colonnes indispensables manquantes : " +
+            detection.missingCore.join(", ")
+          );
+        }
+
+        resFormat.textContent = detection.formatName;
+
+        const supportsMap = new Map();
+        let rowsRead = 0;
+        let rowsValid = 0;
+        let duplicatesIgnored = 0;
+        let rejectedRows = 0;
+        let conflicts = 0;
+
+        const rejectionExamples = [];
+        const conflictExamples = [];
+
+        for (let i = 1; i < lines.length; i++) {
+          const rawLine = lines[i];
+          if (!rawLine || !rawLine.trim()) continue;
+
+          rowsRead++;
+
+          let cols;
+          try {
+            cols = splitCsvLine(rawLine, ";");
+          } catch (err) {
+            rejectedRows++;
+            if (rejectionExamples.length < 10) {
+              rejectionExamples.push(`Ligne ${i + 1}: échec parsing CSV`);
+            }
+            continue;
+          }
+
+          try {
+            const supIdRaw = getField(cols, detection.mapping, "SUP_ID");
+            const supId = String(supIdRaw ?? "").trim();
+
+            if (!supId) {
+              throw new Error("SUP_ID absent");
+            }
+
+            const lat = dmsToDecimal(
+              getField(cols, detection.mapping, "COR_NB_DG_LAT"),
+              getField(cols, detection.mapping, "COR_NB_MN_LAT"),
+              getField(cols, detection.mapping, "COR_NB_SC_LAT"),
+              getField(cols, detection.mapping, "COR_CD_NS_LAT"),
+              true
+            );
+
+            const lon = dmsToDecimal(
+              getField(cols, detection.mapping, "COR_NB_DG_LON"),
+              getField(cols, detection.mapping, "COR_NB_MN_LON"),
+              getField(cols, detection.mapping, "COR_NB_SC_LON"),
+              getField(cols, detection.mapping, "COR_CD_EW_LON"),
+              false
+            );
+
+            const latR = roundCoord(lat, 6);
+            const lonR = roundCoord(lon, 6);
+
+            /*
+            const properties = {
+              SUP_ID: supId,
+              STA_NM_ANFR: trimToNull(getField(cols, detection.mapping, "STA_NM_ANFR")),
+              NAT_ID: trimToNull(getField(cols, detection.mapping, "NAT_ID")),
+              SUP_NM_HAUT: trimToNull(getField(cols, detection.mapping, "SUP_NM_HAUT")),
+              TPO_ID: trimToNull(getField(cols, detection.mapping, "TPO_ID")),
+              ADR_LB_LIEU: trimToNull(getField(cols, detection.mapping, "ADR_LB_LIEU")),
+              ADR_LB_ADD1: trimToNull(getField(cols, detection.mapping, "ADR_LB_ADD1")),
+              ADR_LB_ADD2: trimToNull(getField(cols, detection.mapping, "ADR_LB_ADD2")),
+              ADR_LB_ADD3: trimToNull(getField(cols, detection.mapping, "ADR_LB_ADD3")),
+              ADR_NM_CP: trimToNull(getField(cols, detection.mapping, "ADR_NM_CP")),
+              COM_CD_INSEE: trimToNull(getField(cols, detection.mapping, "COM_CD_INSEE"))
+            };
+            */
+
+            const properties = {
+            SUP_ID: supId
+            };
+
+            rowsValid++;
+
+            if (!supportsMap.has(supId)) {
+              supportsMap.set(supId, {
+                lat: latR,
+                lon: lonR,
+                properties
+              });
+            } else {
+              const existing = supportsMap.get(supId);
+
+              if (existing.lat === latR && existing.lon === lonR) {
+                duplicatesIgnored++;
+              } else {
+                duplicatesIgnored++;
+                conflicts++;
+
+                if (conflictExamples.length < 10) {
+                  conflictExamples.push(
+                    `SUP_ID ${supId}: première position [${existing.lon}, ${existing.lat}] / nouvelle position [${lonR}, ${latR}]`
+                  );
+                }
+              }
+            }
+          } catch (err) {
+            rejectedRows++;
+            if (rejectionExamples.length < 10) {
+              rejectionExamples.push(`Ligne ${i + 1}: ${err.message}`);
+            }
+          }
+        }
+
+        const features = [];
+        for (const entry of supportsMap.values()) {
+          features.push(makeFeature(entry.properties, entry.lon, entry.lat));
+        }
+
+        if (features.length === 0) {
+          throw new Error("Aucun support valide n'a pu être converti.");
+        }
+
+        const geojson = {
+          type: "FeatureCollection",
+          features
+        };
+
+        const firstThreeLines = features
+        .slice(0, 3)
+        .map(f => `${f.properties.SUP_ID};${f.geometry.coordinates[0]};${f.geometry.coordinates[1]}`)
+        .join("\n");
+
+        previewBox.textContent = firstThreeLines || "-";
+
+        geojsonText = JSON.stringify(geojson);
+        geojsonBlob = new Blob([geojsonText], { type: "application/geo+json;charset=utf-8" });
+        outputFileName = `GeoJSON-support_antennes_ANFR-light-${todayForFileName()}.geojson`;
+
+        resRowsRead.textContent = String(rowsRead);
+        resRowsValid.textContent = String(rowsValid);
+        resUniqueWritten.textContent = String(features.length);
+        resDuplicates.textContent = String(duplicatesIgnored);
+        resRejected.textContent = String(rejectedRows);
+        resConflicts.textContent = String(conflicts);
+        resOutputName.textContent = outputFileName;
+        resOutputSize.textContent = formatBytes(geojsonBlob.size);
+
+        downloadBtn.disabled = false;
+
+        const logParts = [];
+        logParts.push(`Conversion terminée.`);
+        logParts.push(`Format détecté : ${detection.formatName}`);
+        logParts.push(`Lignes lues : ${rowsRead}`);
+        logParts.push(`Lignes valides : ${rowsValid}`);
+        logParts.push(`Supports uniques écrits : ${features.length}`);
+        logParts.push(`Doublons ignorés : ${duplicatesIgnored}`);
+        logParts.push(`Lignes rejetées : ${rejectedRows}`);
+        logParts.push(`Anomalies SUP_ID / position : ${conflicts}`);
+        logParts.push(`Taille GeoJSON : ${formatBytes(geojsonBlob.size)}`);
+
+        if (rejectionExamples.length > 0) {
+          logParts.push("");
+          logParts.push("Exemples de rejets :");
+          logParts.push(...rejectionExamples);
+        }
+
+        if (conflictExamples.length > 0) {
+          logParts.push("");
+          logParts.push("Exemples d'anomalies de position :");
+          logParts.push(...conflictExamples);
+        }
+
+        setLog(logParts.join("\n"));
+        setStatus("Conversion réussie.", "ok");
+      } catch (err) {
+        geojsonText = "";
+        geojsonBlob = null;
+        outputFileName = "";
+        downloadBtn.disabled = true;
+        resOutputName.textContent = "-";
+        resOutputSize.textContent = "-";
+        previewBox.textContent = "-";
+        setStatus("Erreur : " + err.message, "err");
+        setLog("Échec de conversion.\n" + err.message);
+      } finally {
+        convertBtn.disabled = !currentFile;
+      }
+    }
+
+    function downloadGeoJSON() {
+      if (!geojsonBlob || !outputFileName) return;
+
+      const url = URL.createObjectURL(geojsonBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = outputFileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    dropZone.addEventListener("dragover", function (e) {
+      e.preventDefault();
+      dropZone.classList.add("dragover");
+    });
+
+    dropZone.addEventListener("dragleave", function () {
+      dropZone.classList.remove("dragover");
+    });
+
+    dropZone.addEventListener("drop", function (e) {
+      e.preventDefault();
+      dropZone.classList.remove("dragover");
+
+      const files = e.dataTransfer.files;
+      if (!files || files.length === 0) return;
+
+      setFile(files[0]);
+    });
+
+    fileInput.addEventListener("change", function () {
+      if (!fileInput.files || fileInput.files.length === 0) {
+        setFile(null);
+        return;
+      }
+      setFile(fileInput.files[0]);
+    });
+
+    convertBtn.addEventListener("click", convertCurrentFile);
+    downloadBtn.addEventListener("click", downloadGeoJSON);
+    resetBtn.addEventListener("click", resetAll);
+
+    resetAll();
+  </script>
+</body>
+</html>
