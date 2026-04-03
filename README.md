@@ -9,4 +9,6 @@ https://www.data.gouv.fr/datasets/donnees-sur-les-installations-radioelectriques
 
 Le fichier geoJSON créé doit ensuite être placé dans le dossier data du repository cartes-ign-topographie
 
-Le nom du fichier doit mis à jour dans le fichier index.html du repository cartes-ign-topographie
+Le nom du fichier doit mis à jour dans le fichier index.html du repository cartes-ign-topographie.
+
+Modifier la ligne : data: "./data/GeoJSON-support_antennes_ANFR-light-2026-04-03.geojson" en fonction du nom du fichier
